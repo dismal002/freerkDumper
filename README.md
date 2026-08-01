@@ -2,7 +2,7 @@
 Free and open source Rockchip firmware dumper written in C. It has been mainly tested on various generic Rockchip TV boxes and photo frames and is no way complete and contributions are welcome!
 
 ## Usage
-Usage: ./freerkDumper [options]
+```Usage: ./freerkDumper [options]
 Device Operations:
   -i, --info         Print device flash and chip information only
   -a, --dump-all     Dump all partitions
@@ -19,4 +19,6 @@ Image Operations:
   --detect <file>    Detect image format and show information
   --verify <file>    Verify image signatures and checksums
 
-  -h, --help         Show this help message 
+  -h, --help         Show this help message
+```
+
