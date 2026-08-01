@@ -501,10 +501,20 @@ void dump_partition(libusb_device_handle *dev, rk_partition_t *part) {
     if (!f) return;
     
     uint32_t sectors_read = 0;
-    uint32_t chunk_sectors = 255;
+    // Match the proprietary tool's per-command chunk limits (see rkReadData in
+    // its Hex-Rays decompile): 128 sectors (0x80) for logical/LBA reads, only
+    // 16 sectors (0x10) for physical/spare-area reads. The old flat 255-sector
+    // chunk exceeded what the loader firmware's transfer buffer actually
+    // supports (especially for -y/physical mode, 16x over), which is what was
+    // producing dumps that differed from the vendor tool's output.
+    uint32_t chunk_sectors = g_physical ? 16 : 128;
     uint32_t bytes_per_sector = g_physical ? 528 : 512;
     uint8_t *buffer = malloc(chunk_sectors * bytes_per_sector);
-    uint32_t rkcrc = 0; // Initialize Rockchip CRC to zero
+    // Preserve just the very first chunk (sector 0 of the partition) separately,
+    // since it's needed after the loop for IDB payload parsing below and
+    // `buffer` otherwise ends up holding whatever the *last* chunk was.
+    uint8_t *first_chunk = malloc(chunk_sectors * bytes_per_sector);
+    bool have_first_chunk = false;
 
     while (sectors_read < part->size) {
         uint32_t chunk = chunk_sectors;
@@ -519,23 +529,30 @@ void dump_partition(libusb_device_handle *dev, rk_partition_t *part) {
         }
         
         fwrite(buffer, 1, chunk * bytes_per_sector, f);
-        rkcrc = rkcrc_update(rkcrc, buffer, chunk * bytes_per_sector);
+        
+        if (!have_first_chunk) {
+            memcpy(first_chunk, buffer, chunk * bytes_per_sector);
+            have_first_chunk = true;
+        }
         
         sectors_read += chunk;
     }
     
-    // Inject the rkCRC at the very end of the file
-    fwrite(&rkcrc, 1, 4, f);
-    log_print("\n - Appended rkCRC signature: 0x%08X", rkcrc);
+    // NOTE: no rkCRC footer here. The proprietary tool's rkCRC only gets
+    // "injected" when *packing* a combined backup/update image (records
+    // table + RC4'd payloads); its raw per-partition dump path just fwrite()s
+    // the chunks and fclose()s. Appending a CRC here made every one of our
+    // dumps 4 bytes larger than the real partition content and than the
+    // vendor tool's own output.
     
     printf("\nFinished '%s'.\n", part->name);
     
     // If this is the Bootloader/IDB, rkDumper unpacks its internal payloads into .rc4 pieces
-    if (strcmp(part->name, "MiniLoaderAll") == 0) {
+    if (strcmp(part->name, "MiniLoaderAll") == 0 && have_first_chunk) {
         log_print("[*] Parsing IDB Sector 0 to extract internal FlashData/FlashBoot payloads...\n");
         // Rockchip IDB maps its internal payloads into 512-byte blocks.
         // We use the exact array offsets identified in source_3.c (v24 array / Sector 0).
-        uint16_t* sector0 = (uint16_t*)buffer;
+        uint16_t* sector0 = (uint16_t*)first_chunk;
         
         // Safety bounds check on Sector 0
         if (sectors_read > 4) {
@@ -543,7 +560,7 @@ void dump_partition(libusb_device_handle *dev, rk_partition_t *part) {
             uint32_t flash_data_size = (sector0[126] >> 16) * 512; // HIWORD(v24[126]) << 9
             
             log_print(" - FlashData offset: 0x%08X, size: %u bytes\n", flash_data_offset, flash_data_size);
-            // fwrite(&buffer[flash_data_offset], 1, flash_data_size, create_file("IDB/FlashData_dump.rc4"));
+            // fwrite(&first_chunk[flash_data_offset], 1, flash_data_size, create_file("IDB/FlashData_dump.rc4"));
             
             // FlashBoot offset typically calculated similarly via v24[126]
             log_print(" - Extracted RC4 encrypted payloads internally.\n");
@@ -551,6 +568,7 @@ void dump_partition(libusb_device_handle *dev, rk_partition_t *part) {
     }
     
     free(buffer);
+    free(first_chunk);
     fclose(f);
 }
 
@@ -1026,5 +1044,3 @@ int main(int argc, char** argv) {
     printf("\nOperations Complete.\n");
     return 0;
 }
-
-
