@@ -14,42 +14,51 @@
 
 #define ROCKCHIP_VENDOR_ID 0x2207
 
-// Rockchip Product IDs by Device Mode
-const uint16_t ROCKCHIP_MSC_PIDS[] = {
-    0x290A, // RK2918 - MSC mode
-    0x292A, // RK2928 - MSC mode
-    0x300A, // RK3066 - MSC mode
-    0x310B, // RK3188 - MSC mode
-    0x320A, // RK3288 - MSC mode
-    0x320B, // RK3288 - MSC mode variant
-    0x330A, // RK3368 - MSC mode
-    0x330C, // RK3399 - MSC mode
-    0x330D, // RK Series - MSC mode
-    0x0000  // End config
-};
-
-// Rockchip LOADER mode Product IDs (bootloader programming mode)
-const uint16_t ROCKCHIP_LOADER_PIDS[] = {
-    0x0001, // RK2918 - LOADER mode
-    0x0002, // RK2928 - LOADER mode
-    0x0003, // RK3066 - LOADER mode
-    0x0004, // RK3188 - LOADER mode
-    0x0005, // RK3288 - LOADER mode
-    0x0006, // RK3368 - LOADER mode
-    0x0007, // RK3399 - LOADER mode
-    0x0000  // End config
-};
-
-// Rockchip MASKROM mode Product IDs (recovery/unbrickable mode)
+// Rockchip Mask ROM Product IDs
+// Source: rkdeveloptool / upgrade_tool PID tables
+// All these PIDs enumerate as Mask ROM (MASKROM) or Loader mode devices.
 const uint16_t ROCKCHIP_MASKROM_PIDS[] = {
-    0x0101, // RK2918 - MASKROM mode
-    0x0102, // RK2928 - MASKROM mode
-    0x0103, // RK3066 - MASKROM mode
-    0x0104, // RK3188 - MASKROM mode
-    0x0105, // RK3288 - MASKROM mode
-    0x0106, // RK3368 - MASKROM mode
-    0x0107, // RK3399 - MASKROM mode
-    0x0000  // End config
+    0x281A, // RK2818  - Mask ROM mode
+    0x290A, // RK2918  - Mask ROM mode
+    0x292A, // RK2928  - Mask ROM mode
+    0x292C, // RK3026  - Mask ROM mode
+    0x300A, // RK3066  - Mask ROM mode
+    0x300B, // RK3168  - Mask ROM mode
+    0x301A, // RK3036  - Mask ROM mode
+    0x310A, // RK3066B - Mask ROM mode
+    0x310B, // RK3188  - Mask ROM mode
+    0x310C, // RK312X  - Mask ROM mode (RK3126 / RK3128)
+    0x310D, // RK3126  - Mask ROM mode
+    0x320A, // RK3288  - Mask ROM mode
+    0x320B, // RK322X  - Mask ROM mode (RK3228 / RK3229)
+    0x320C, // RK3328  - Mask ROM mode
+    0x330A, // RK3368  - Mask ROM mode
+    0x330C, // RK3399  - Mask ROM mode
+    0x330E, // RK3308  - Mask ROM mode
+    0x350A, // RK3568  - Mask ROM mode (RK3566 / RK3568)
+    0x350B, // RK3588  - Mask ROM mode (RK3588 / RK3588S / RK3582)
+    0x350C, // RK3528  - Mask ROM mode
+    0x0000  // End sentinel
+};
+
+// Rockchip LOADER mode Product IDs (bootloader/download mode via rkdeveloptool)
+// Loader mode uses small sequential PIDs distinct from the Mask ROM PIDs above.
+const uint16_t ROCKCHIP_LOADER_PIDS[] = {
+    0x0001, // RK2918  - Loader mode
+    0x0002, // RK2928  - Loader mode
+    0x0003, // RK3066  - Loader mode
+    0x0004, // RK3188  - Loader mode
+    0x0005, // RK3288  - Loader mode
+    0x0006, // RK3368  - Loader mode
+    0x0007, // RK3399  - Loader mode
+    0x0008, // RK3328  - Loader mode
+    0x0000  // End sentinel
+};
+
+// Rockchip MSC mode Product IDs (Android Mass Storage / ADB mode)
+// Devices in MSC mode present as standard USB mass storage.
+const uint16_t ROCKCHIP_MSC_PIDS[] = {
+    0x0000  // No well-known MSC PIDs; MSC devices are detected by USB class
 };
 
 #define EP_BULK_OUT 0x02
@@ -300,8 +309,32 @@ int parse_parameter_file(const char* parameter_data, rk_partition_t* parts, int 
         return count;
     }
 
-    // Fallback to legacy parameter format
-    const char* cmdline = strstr(parameter_data, "CMDLINE:");
+    // Skip the Rockchip PARM binary header if present.
+    // Format: 4-byte "PARM" tag + 4-byte LE length, followed by text.
+    const char* text_start = parameter_data;
+    if (memcmp(parameter_data, "PARM", 4) == 0) {
+        text_start = parameter_data + 8;
+        log_print(" - Detected PARM binary header, skipping 8-byte prefix.\n");
+    }
+
+    // Find the un-commented CMDLINE: line.
+    // Rockchip parameter files often have a backup "#CMDLINE:" (commented) and
+    // the live "CMDLINE:" entry. We must skip any that are preceded by '#'.
+    const char* cmdline = NULL;
+    const char* search = text_start;
+    while ((search = strstr(search, "CMDLINE:")) != NULL) {
+        // Walk back to start of line to check for a '#' comment prefix
+        const char* line_start = search;
+        while (line_start > text_start && line_start[-1] != '\n' && line_start[-1] != '\r') {
+            line_start--;
+        }
+        if (*line_start != '#') {
+            cmdline = search;
+            break;
+        }
+        search++; // skip this commented match and keep searching
+    }
+
     if (!cmdline) {
         log_print("Could not find CMDLINE in parameter file.\n");
         return 0;
@@ -323,13 +356,14 @@ int parse_parameter_file(const char* parameter_data, rk_partition_t* parts, int 
         parts_start++; // Skip the colon
     }
     
-    char buf[1024];
+    // Copy the partition list into a working buffer (2KB to handle long cmdlines)
+    char buf[2048];
     strncpy(buf, parts_start, sizeof(buf)-1);
     buf[sizeof(buf)-1] = '\0';
     
-    // Trim newline or spaces
+    // Trim at newline, carriage return, or trailing ';' (Rockchip appends CRC after semicolon)
     for (int i = 0; buf[i]; i++) {
-        if (buf[i] == '\r' || buf[i] == '\n') {
+        if (buf[i] == '\r' || buf[i] == '\n' || buf[i] == ';') {
             buf[i] = '\0';
             break;
         }
@@ -727,7 +761,6 @@ int main(int argc, char** argv) {
     bool image_verify = false;
     bool encrypt_rc4 = false;
     char image_input_file[512] = "";
-    char image_output_file[512] = "";
     
     while ((opt = getopt_long(argc, argv, "iap:o:ym:sh", long_options, NULL)) != -1) {
         switch (opt) {
@@ -839,11 +872,12 @@ int main(int argc, char** argv) {
         // Try all modes in order: MSC, LOADER, MASKROM
         log_print("[*] Searching for any RockChip device...\n");
         
-        for (int i = 0; ROCKCHIP_MSC_PIDS[i] != 0; i++) {
-            dev = libusb_open_device_with_vid_pid(NULL, ROCKCHIP_VENDOR_ID, ROCKCHIP_MSC_PIDS[i]);
+        // Try MASKROM first — this table now contains all known Rockchip PIDs
+        for (int i = 0; ROCKCHIP_MASKROM_PIDS[i] != 0; i++) {
+            dev = libusb_open_device_with_vid_pid(NULL, ROCKCHIP_VENDOR_ID, ROCKCHIP_MASKROM_PIDS[i]);
             if (dev) {
-                found_pid = ROCKCHIP_MSC_PIDS[i];
-                g_device_mode = DEVICE_MODE_MSC;
+                found_pid = ROCKCHIP_MASKROM_PIDS[i];
+                g_device_mode = DEVICE_MODE_MASKROM;
                 break;
             }
         }
@@ -859,14 +893,32 @@ int main(int argc, char** argv) {
             }
         }
         
+        // Fallback: enumerate all USB devices and open any VID=0x2207 device
+        // This handles unknown / future PIDs that are not yet in our tables.
         if (!dev) {
-            for (int i = 0; ROCKCHIP_MASKROM_PIDS[i] != 0; i++) {
-                dev = libusb_open_device_with_vid_pid(NULL, ROCKCHIP_VENDOR_ID, ROCKCHIP_MASKROM_PIDS[i]);
-                if (dev) {
-                    found_pid = ROCKCHIP_MASKROM_PIDS[i];
-                    g_device_mode = DEVICE_MODE_MASKROM;
-                    break;
+            log_print("[*] Known PIDs not matched. Trying fallback scan for any VID=0x2207 device...\n");
+            libusb_device **fallback_devs;
+            ssize_t device_count = libusb_get_device_list(NULL, &fallback_devs);
+            if (device_count > 0) {
+                for (ssize_t i = 0; i < device_count && !dev; i++) {
+                    struct libusb_device_descriptor desc;
+                    if (libusb_get_device_descriptor(fallback_devs[i], &desc) == 0) {
+                        if (desc.idVendor == ROCKCHIP_VENDOR_ID) {
+                            int rc = libusb_open(fallback_devs[i], &dev);
+                            if (rc == 0) {
+                                found_pid = desc.idProduct;
+                                g_device_mode = detect_device_mode(desc.idProduct);
+                                log_print("[*] Fallback matched PID: 0x%04X, Mode: %s\n",
+                                          found_pid, device_mode_name(g_device_mode));
+                            } else {
+                                log_print("[!] Found VID=0x2207 PID=0x%04X but open failed: %s\n"
+                                          "    Try running with sudo or install the udev rule.\n",
+                                          desc.idProduct, libusb_strerror((enum libusb_error)rc));
+                            }
+                        }
+                    }
                 }
+                libusb_free_device_list(fallback_devs, 1);
             }
         }
     }
@@ -888,13 +940,16 @@ int main(int argc, char** argv) {
     
     // Mode-specific initialization and warnings
     if (g_device_mode == DEVICE_MODE_LOADER) {
-        log_print("[*] Operating in LOADER mode (bootloader programming)\n");
-        log_print("[!] WARNING: Device is in bootloader mode. Improper operations may brick the device!\n");
+        log_print("[*] Operating in LOADER mode (bootloader/download mode)\n");
+        log_print("[!] WARNING: Improper operations in loader mode may brick the device!\n");
     } else if (g_device_mode == DEVICE_MODE_MASKROM) {
-        log_print("[*] Operating in MASKROM mode (recovery unbrickable)\n");
-        log_print("[!] Device is in recovery mode. This device is unbrickable.\n");
-    } else {
+        log_print("[*] Operating in MASKROM mode (Mask ROM / unbrickable recovery)\n");
+        log_print("[!] Device is in Mask ROM mode. Safe to flash — cannot be bricked from here.\n");
+    } else if (g_device_mode == DEVICE_MODE_MSC) {
         log_print("[*] Operating in MSC mode (normal mass storage)\n");
+    } else {
+        log_print("[*] Operating in Unknown mode (PID 0x%04X not in known tables)\n", found_pid);
+        log_print("[!] Proceeding with best-effort BOT commands.\n");
     }
     
     wakeup_rockchip_device(dev);
@@ -917,7 +972,7 @@ int main(int argc, char** argv) {
         int num_partitions = parse_parameter_file((const char*)param_buffer, partitions, MAX_PARTITIONS);
         
         // 1. Save the parameter file physically to disk
-        char param_path[256];
+        char param_path[sizeof(g_output_dir) + 32];
         snprintf(param_path, sizeof(param_path), "%s/parameter.txt", g_output_dir);
         FILE *pf = fopen(param_path, "wb");
         if (pf) {

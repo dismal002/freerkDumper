@@ -63,10 +63,6 @@ typedef struct {
 
 static sha1_ctx_t g_sha1_ctx;
 
-static uint32_t sha1_rol(uint32_t x, int n) {
-    return (x << n) | (x >> (32 - n));
-}
-
 void sha1_init(void) {
     g_sha1_ctx.h[0] = 0x67452301;
     g_sha1_ctx.h[1] = 0xEFCDAB89;
@@ -488,7 +484,10 @@ bool pack_rkfp_image(const char *output_file, const char *input_dir) {
             memset(&img_entry, 0, sizeof(img_entry));
             img_entry.offset = current_offset;
             img_entry.size = size;
-            strncpy((char *)img_entry.name, entry->d_name, 31);
+            size_t name_max = sizeof(img_entry.name) - 1;
+            size_t name_len = strlen(entry->d_name);
+            if (name_len > name_max) name_len = name_max;
+            memcpy(img_entry.name, entry->d_name, name_len);
             
             fwrite(&img_entry, sizeof(img_entry), 1, out);
             current_offset += size;
